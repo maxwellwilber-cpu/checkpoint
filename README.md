@@ -1,5 +1,7 @@
 # checkpoint
 
+[![tests](https://github.com/maxwellwilber-cpu/checkpoint/actions/workflows/tests.yml/badge.svg)](https://github.com/maxwellwilber-cpu/checkpoint/actions/workflows/tests.yml)
+
 Validate AI output against rules you declare, before it reaches anyone.
 
 Schema validation tells you an LLM returned well-formed JSON. It does not tell you the
@@ -72,7 +74,30 @@ FAIL [subtle]: 10 checks, 1 blockers
 `27400` reads as a conclusion the analysis would reasonably reach. It is not in the
 source and not derivable by any stated method. Nothing else in the document is wrong.
 
-**Scope this check deliberately** — it is the one real subtlety in the library. Grounding
+### What it does not do
+
+Three limits, stated up front, because a validator you trust further than it deserves is
+worse than no validator.
+
+**It does not understand arithmetic.** If the source holds monthly revenue and the output
+correctly states the annual total, that total is not in the source and it gets flagged.
+Sums, averages and growth rates all fail. For output that computes anything, list only
+the fields that quote source values directly, or put the derived figures into the source
+you pass in.
+
+**It does not check which claim a number belongs to.** The test is membership in a flat
+bag of numbers. With revenue 104000 and headcount 14 in the source, "headcount is 104000"
+passes, because 104000 is in there somewhere. It catches invented values. It does not
+catch a real value attached to the wrong subject.
+
+**Section and version numbers in prose still count.** "See section 3.2" reads as a figure.
+Identifiers like `INV-2024` and dates are filtered out, but section references are not,
+because a heuristic aggressive enough to catch them starts discarding real values. Use
+`ignore` for the ones you expect.
+
+All three have tests asserting them, so they cannot change without someone noticing.
+
+**Scope this check deliberately.** It is the one real subtlety in the library. Grounding
 applies to claims *about* the data: summaries, findings, computed figures. It must not
 apply to recommendations or forecasts, because a proposal is supposed to introduce new
 numbers. "Move 3 of the 14 roles to variable scheduling" contains a 3 that exists nowhere
@@ -91,7 +116,7 @@ I found that out by writing the example and watching a perfectly good output fai
 | `not_empty(*paths)` | Blank strings, empty lists (but `0` is a real value, not an absence) |
 | `of_type(path, types)` | `"1200"` returned where `1200` was needed |
 | `numeric_range(path, min, max)` | Negative prices, percentages over 100 |
-| `one_of(path, allowed)` | Invented enum values — asked for high/medium/low, got "moderate" |
+| `one_of(path, allowed)` | Invented enum values. Asked for high/medium/low, got "moderate" |
 | `matches(path, regex)` | Malformed ids, dates, codes |
 | `word_count(path, min, max)` | Summaries that run long or short (warning, not blocker) |
 | `no_placeholders()` | `[INSERT NAME]`, `TODO`, `lorem ipsum`, "As an AI language model…" |
@@ -124,7 +149,7 @@ any of those. The most common rule anyone writes is one line long, and making it
 
 **Findings are data.** A check returns findings; something else decides what to do with
 them. That is what lets one ruleset serve tests, CI, and production without a rewrite.
-`report.raise_for_blockers()` is available and opt-in — a library that raises by default
+`report.raise_for_blockers()` is available and opt-in. A library that raises by default
 forces every caller into `try/except` even when they only wanted to look.
 
 **Three severities, not five.** `BLOCKER` stops the output, `WARNING` records it,
@@ -192,15 +217,15 @@ failed = {k: r for k, r in reports.items() if not r.passed}
 python -m pytest tests/ -v
 ```
 
-67 tests. The ones worth reading are the regressions, because each is a bug this library
+71 tests. The ones worth reading are the regressions, because each is a bug this library
 actually had:
 
-- `test_identifiers_are_not_treated_as_numeric_claims` — `grounded_numbers` once mined
+- `test_identifiers_are_not_treated_as_numeric_claims`: `grounded_numbers` once mined
   the `9` out of the id `"s9"` and reported a hallucinated figure. A validator that cries
   wolf gets switched off, so a false positive here is worse than a missed catch.
-- `test_negative_index` — `items[-1]` parsed as a dict key named `-1` and resolved to
+- `test_negative_index`: `items[-1]` parsed as a dict key named `-1` and resolved to
   nothing, which looks identical to a missing field.
-- `test_a_crashing_rule_reports_instead_of_passing` — the failure mode that would make
+- `test_a_crashing_rule_reports_instead_of_passing`: the failure mode that would make
   every other guarantee here worthless.
 
 ---
@@ -221,10 +246,10 @@ tests/                      67 pytest tests
 
 ## Related
 
-- [evs](https://github.com/maxwellwilber-cpu/evs) — the predecessor: 73 validation checks
+- [evs](https://github.com/maxwellwilber-cpu/evs) is the predecessor. 73 validation checks
   and 43 tests against a specific AI financial-analysis pipeline. `checkpoint` is that
   idea generalized to any AI output.
-- [client-data-cleaner](https://github.com/maxwellwilber-cpu/client-data-cleaner) — the
+- [client-data-cleaner](https://github.com/maxwellwilber-cpu/client-data-cleaner) applies the
   same principle applied to record linkage: measure the accuracy instead of asserting it.
 
 MIT licensed. Built by [Maxwell Wilber](https://linkedin.com/in/maxwellwilber).

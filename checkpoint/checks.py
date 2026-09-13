@@ -246,6 +246,27 @@ def grounded_numbers(source, paths=None, tolerance=0.0, severity=Severity.BLOCKE
     Schema validation passes it. Type checks pass it. A human skimming passes it. The
     only thing that catches it is asking whether the number is actually in the source.
 
+    TWO LIMITS YOU NEED TO KNOW BEFORE RELYING ON THIS.
+
+    **It does not understand arithmetic.** If the source holds monthly revenue and the
+    output correctly states the annual total, that total is not in the source and this
+    check flags it. Sums, averages, growth rates and per-head figures all fail. For
+    output that computes anything, either list only the fields that quote source values
+    directly, or add the derived figures to the source you pass in.
+
+    **It does not check which claim a number is attached to.** The test is membership in
+    a flat bag of numbers pulled from the source. Given a source with revenue 104000 and
+    headcount 14, the sentence "headcount is 104000" passes, because 104000 does appear
+    in the source. It catches invented values. It does not catch a real value bolted onto
+    the wrong subject, which is a different failure and needs a rule that knows your
+    schema.
+
+    **Numbers inside prose that are not claims still count.** "See section 3.2" and
+    "version 2.1" get read as figures, because from the outside they look exactly like
+    one. Identifiers and dates are filtered out (see _is_numeric_claim), but section and
+    version references in running text are not, and adding a heuristic for them would
+    start throwing away real values. Use `ignore` to list any such numbers you expect.
+
     SCOPE THIS. Point it at the fields that make claims about the data — summaries,
     findings, computed figures. Do NOT point it at recommendations, forecasts or
     proposals: those are supposed to introduce numbers that are not in the source
@@ -347,7 +368,10 @@ def _iter_numbers(node, trail=""):
     elif isinstance(node, str):
         if not _is_numeric_claim(node):
             return
-        for match in re.findall(r"-?\d[\d,]*\.?\d*", node):
+        # (?<![\w-]) stops the hyphen in "INV-2024" being read as a minus sign, and stops
+        # digits inside an identifier being picked up at all. A real negative number is
+        # preceded by a space or start-of-string, never by a letter or another hyphen.
+        for match in re.findall(r"(?<![\w-])-?\d[\d,]*\.?\d*", node):
             cleaned = match.replace(",", "").rstrip(".")
             if cleaned and cleaned not in ("-",):
                 try:

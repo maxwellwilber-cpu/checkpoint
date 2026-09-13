@@ -168,6 +168,32 @@ class TestGroundedNumbers:
         assert not run(data, C.grounded_numbers(self.SOURCE)).passed
         assert run(data, C.grounded_numbers(self.SOURCE, tolerance=0.01)).passed
 
+    def test_identifier_in_prose_is_not_mined_for_numbers(self):
+        # Regression: "INV-2024" in a sentence yielded -2024, because the regex read the
+        # hyphen as a minus sign. A real negative is preceded by a space, not a letter.
+        data = {"summary": "Invoice INV-2024 cleared on time."}
+        assert run(data, C.grounded_numbers(self.SOURCE)).passed
+
+    def test_a_real_negative_number_is_still_read(self):
+        # The fix above must not stop genuine negatives being checked.
+        data = {"summary": "Margin was -4000 that month."}
+        assert not run(data, C.grounded_numbers(self.SOURCE)).passed
+
+    def test_documented_limit_arithmetic_is_not_understood(self):
+        # This asserts a LIMITATION, not a feature. The correct annual total of the
+        # source's monthly revenue is flagged, because the check tests membership in the
+        # source rather than derivability from it. Documented in the docstring; this test
+        # exists so the limit cannot change silently.
+        total = sum(self.SOURCE["revenue"])
+        data = {"summary": f"Revenue totalled {total} for the year."}
+        assert not run(data, C.grounded_numbers(self.SOURCE)).passed
+
+    def test_documented_limit_no_field_association(self):
+        # Also a limitation. 104000 is a real value in the source, so attaching it to the
+        # wrong subject passes. Catching this needs a rule that knows the schema.
+        data = {"summary": "Headcount is 125000."}
+        assert run(data, C.grounded_numbers(self.SOURCE)).passed
+
     def test_comma_formatted_numbers_are_read(self):
         data = {"summary": "Revenue reached 187,500 this year."}
         assert not run(data, C.grounded_numbers(self.SOURCE)).passed
