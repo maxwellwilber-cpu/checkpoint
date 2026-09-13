@@ -197,3 +197,106 @@ class TestGroundedNumbers:
     def test_comma_formatted_numbers_are_read(self):
         data = {"summary": "Revenue reached 187,500 this year."}
         assert not run(data, C.grounded_numbers(self.SOURCE)).passed
+
+
+class TestZeroMatchIsNeverSilent:
+    """
+    A path that matches nothing means the rule validated nothing.
+
+    Reporting PASS in that situation is the exact failure this library exists to
+    prevent, and one typo in a field name was enough to cause it.
+    """
+
+    SOURCE = {"revenue": [82000, 91000]}
+    BAD = {"findings": [{"text": "Revenue hit 99999 this year."}]}
+
+    def test_correct_path_catches_the_invention(self):
+        report = run(self.BAD, C.grounded_numbers(self.SOURCE, paths=["findings[].text"]))
+        assert not report.passed
+
+    def test_typo_in_path_warns_instead_of_passing_silently(self):
+        report = run(self.BAD, C.grounded_numbers(self.SOURCE, paths=["findings[].txet"]))
+        assert len(report.warnings) == 1
+        assert "matched nothing" in report.warnings[0].message
+
+    def test_missing_wildcard_warns(self):
+        report = run(self.BAD, C.grounded_numbers(self.SOURCE, paths=["findings.text"]))
+        assert len(report.warnings) == 1
+
+    def test_empty_paths_list_checks_nothing_rather_than_everything(self):
+        # paths=[] used to fall through to "the whole document", the opposite of intent.
+        report = run(self.BAD, C.grounded_numbers(self.SOURCE, paths=[]))
+        assert report.passed and not report.findings
+
+    def test_every_path_check_reports_a_dead_path(self):
+        for rule in (C.not_empty("nope"), C.of_type("nope", str),
+                     C.numeric_range("nope", 0, 1), C.one_of("nope", [1]),
+                     C.matches("nope", r"\d+"),
+                     C.citations_resolve("nope[]", "id", ["a"])):
+            assert run({"real": 1}, rule).warnings, rule
+
+
+class TestRequiredAcrossWildcards:
+    def test_every_element_must_carry_the_field(self):
+        # Used to pass because SOME location matched.
+        report = run({"items": [{"id": 1}, {"no_id": 2}, {}]}, C.required("items[].id"))
+        assert len(report.blockers) == 2
+
+
+class TestMalformedValuesDoNotDiscardFindings:
+    def test_unhashable_citation_does_not_lose_the_real_ones(self):
+        data = {"findings": [{"source_id": "nope"}, {"source_id": {"a": 1}},
+                             {"source_id": "also-nope"}]}
+        report = run(data, C.citations_resolve("findings[]", "source_id", ["src-a"]))
+        assert len(report.blockers) == 3
+
+    def test_empty_citation_list_is_caught(self):
+        data = {"findings": [{"text": "x", "source_id": []}]}
+        assert not run(data, C.citations_resolve("findings[]", "source_id", ["a"])).passed
+
+    def test_a_bare_string_claim_is_caught(self):
+        data = {"findings": ["a claim with no citation at all"]}
+        assert not run(data, C.citations_resolve("findings[]", "source_id", ["a"])).passed
+
+
+class TestNumericEdgeCases:
+    def test_nan_does_not_satisfy_a_range(self):
+        import json
+        data = json.loads('{"price": NaN}')
+        assert not run(data, C.numeric_range("price", minimum=0, maximum=100)).passed
+
+    def test_infinity_does_not_satisfy_a_range(self):
+        assert not run({"price": float("inf")}, C.numeric_range("price", 0, 100)).passed
+
+    def test_true_is_not_accepted_where_one_is_allowed(self):
+        assert not run({"priority": True}, C.one_of("priority", [1, 2, 3])).passed
+
+
+class TestStringMatching:
+    def test_matches_means_match_not_contains(self):
+        assert not run({"id": "TOTALLY-BOGUS-INV-2024-XYZ"},
+                       C.matches("id", r"INV-\d{4}")).passed
+
+    def test_exact_match_passes(self):
+        assert run({"id": "INV-2024"}, C.matches("id", r"INV-\d{4}")).passed
+
+
+class TestNumberParsing:
+    SOURCE = {"revenue": [82000, 91000, 104000], "headcount": 14}
+
+    def test_comma_lists_are_not_read_as_thousands(self):
+        # "regions 4,5 and 6" was read as the number 45.
+        data = {"summary": "Headcount of 14 covers regions 4,5 and 6."}
+        report = run(data, C.grounded_numbers(self.SOURCE, paths=["summary"],
+                                              ignore=(0, 1, 4, 5, 6)))
+        assert report.passed
+
+    def test_thousands_separators_still_parse(self):
+        data = {"summary": "Revenue reached 104,000 this year."}
+        assert run(data, C.grounded_numbers(self.SOURCE, paths=["summary"])).passed
+
+    def test_dates_inside_prose_are_not_mined(self):
+        # "Reported on 03/15/2024" yielded 3, 15 and 2024 as ungrounded figures.
+        for text in ["Reported on 2024-03-15.", "Reported on 03/15/2024."]:
+            assert run({"summary": text},
+                       C.grounded_numbers(self.SOURCE, paths=["summary"])).passed

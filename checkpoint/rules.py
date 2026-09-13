@@ -6,7 +6,16 @@ it fails you need to know what it was called, how serious it is, and where the p
 was. A Rule carries that, so the runner can stay dumb and the report can stay rich.
 """
 
+import re
+
 from .types import Finding, Severity
+
+_PATHISH = re.compile(r"^[\w.\[\]-]*$")
+
+
+def _looks_like_path(value):
+    """A path has no spaces. A message almost always does."""
+    return isinstance(value, str) and bool(_PATHISH.match(value))
 
 
 class Rule:
@@ -38,6 +47,10 @@ class Rule:
             # A rule that crashes is itself a finding. Swallowing the exception would
             # silently skip the check and report a clean pass, which is the single most
             # dangerous thing a validation library can do.
+            #
+            # Built-in checks handle a malformed item per item rather than letting it
+            # abort the loop, so reaching here means the rule itself is broken, not the
+            # data. See _safe_item in checks.py.
             return [Finding(
                 check_id=self.check_id,
                 severity=Severity.BLOCKER,
@@ -54,7 +67,11 @@ class Rule:
             return [Finding(self.check_id, self.severity, raw)]
         if isinstance(raw, tuple) and len(raw) == 2:
             path, message = raw
-            return [Finding(self.check_id, self.severity, message, path=path)]
+            # A 2-tuple is (path, message). If the first element does not look like a
+            # path, this is two messages and collapsing them would silently lose one.
+            if _looks_like_path(path):
+                return [Finding(self.check_id, self.severity, message, path=path)]
+            return [Finding(self.check_id, self.severity, str(m)) for m in raw]
         if isinstance(raw, (list, tuple)):
             findings = []
             for item in raw:

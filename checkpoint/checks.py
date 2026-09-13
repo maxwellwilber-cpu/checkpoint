@@ -31,6 +31,29 @@ _PLACEHOLDERS = [
 ]
 
 
+def _matched(data, path, check_id, severity=Severity.WARNING):
+    """
+    Resolve a path, and report it when it matches nothing.
+
+    A declared path that matches zero locations means the rule ran and checked nothing.
+    Silently returning no findings then reports PASS on a document nobody validated,
+    which this library's own documentation calls the most dangerous thing a validation
+    library can do. One typo in a field name was enough to trigger it:
+
+        grounded_numbers(src, paths=["findings[].text"])   catches an invented number
+        grounded_numbers(src, paths=["findings[].txet"])   used to report PASS
+
+    Returns (matches, findings). The finding is a WARNING rather than a BLOCKER because
+    an optional field legitimately goes missing, but it is never silent.
+    """
+    matches = list(resolve(data, path))
+    if matches:
+        return matches, []
+    return [], [Finding(check_id, severity,
+                        f"path {path!r} matched nothing, so this check validated nothing",
+                        path)]
+
+
 def required(*paths, severity=Severity.BLOCKER):
     """Every listed path must exist and not be None."""
     def check(data):
@@ -39,10 +62,21 @@ def required(*paths, severity=Severity.BLOCKER):
             matches = list(resolve(data, path))
             if not matches:
                 findings.append((path, "required field is missing"))
-            else:
-                for concrete, value in matches:
-                    if value is None:
-                        findings.append((concrete, "required field is null"))
+                continue
+            for concrete, value in matches:
+                if value is None:
+                    findings.append((concrete, "required field is null"))
+
+            # For a wildcard path, every element must carry the field. Checking only
+            # that SOME location matched meant required("items[].id") passed when one
+            # item out of three had an id.
+            if "[]" in path:
+                parent, _, leaf = path.rpartition(".")
+                if parent and leaf:
+                    for pconcrete, container in resolve(data, parent):
+                        if isinstance(container, dict) and leaf not in container:
+                            findings.append((f"{pconcrete}.{leaf}",
+                                             "required field is missing"))
         return findings
     return Rule(check, check_id="required", severity=severity,
                 description=f"Required: {', '.join(paths)}")
@@ -53,7 +87,9 @@ def not_empty(*paths, severity=Severity.BLOCKER):
     def check(data):
         findings = []
         for path in paths:
-            for concrete, value in resolve(data, path):
+            matches, missing = _matched(data, path, "not_empty")
+            findings.extend(missing)
+            for concrete, value in matches:
                 if value is None:
                     findings.append((concrete, "is null"))
                 elif isinstance(value, str) and not value.strip():
@@ -76,8 +112,8 @@ def of_type(path, expected, severity=Severity.BLOCKER):
     names = "/".join(t.__name__ for t in types)
 
     def check(data):
-        findings = []
-        for concrete, value in resolve(data, path):
+        matches, findings = _matched(data, path, f"of_type[{path}]")
+        for concrete, value in matches:
             # bool is a subclass of int in Python; treat them as distinct here.
             if isinstance(value, bool) and bool not in types:
                 findings.append((concrete, f"expected {names}, got bool"))
@@ -91,10 +127,16 @@ def of_type(path, expected, severity=Severity.BLOCKER):
 def numeric_range(path, minimum=None, maximum=None, severity=Severity.BLOCKER):
     """Numbers at path must fall within bounds."""
     def check(data):
-        findings = []
-        for concrete, value in resolve(data, path):
+        matches, findings = _matched(data, path, f"numeric_range[{path}]")
+        for concrete, value in matches:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 continue  # type is of_type()'s job, not this one's
+            # Every comparison against NaN is False, so NaN silently satisfied any
+            # range. json.loads accepts bare NaN, so this is reachable from real output.
+            if value != value or value in (float("inf"), float("-inf")):
+                findings.append(Finding(f"numeric_range[{path}]", severity,
+                                        f"{value} is not a finite number", concrete, str(value)))
+                continue
             if minimum is not None and value < minimum:
                 findings.append(Finding(f"numeric_range[{path}]", severity,
                                         f"{value} is below minimum {minimum}", concrete, value))
@@ -117,9 +159,12 @@ def one_of(path, allowed, severity=Severity.BLOCKER):
     allowed_set = set(allowed)
 
     def check(data):
-        findings = []
-        for concrete, value in resolve(data, path):
-            if value not in allowed_set:
+        matches, findings = _matched(data, path, f"one_of[{path}]")
+        for concrete, value in matches:
+            # True == 1 in Python, so a boolean slipped through an allowed set of ints.
+            is_bool_mismatch = isinstance(value, bool) and not any(
+                isinstance(a, bool) for a in allowed_set)
+            if is_bool_mismatch or value not in allowed_set:
                 preview = ", ".join(sorted(str(a) for a in allowed_set)[:8])
                 findings.append(Finding(f"one_of[{path}]", severity,
                                         f"{value!r} is not one of: {preview}", concrete, value))
@@ -133,9 +178,11 @@ def matches(path, pattern, severity=Severity.BLOCKER, label=None):
     compiled = re.compile(pattern)
 
     def check(data):
-        findings = []
-        for concrete, value in resolve(data, path):
-            if not isinstance(value, str) or not compiled.search(value):
+        matches_, findings = _matched(data, path, f"matches[{path}]")
+        for concrete, value in matches_:
+            # fullmatch, not search. "String must match a regex" meant a value of
+            # "TOTALLY-BOGUS-INV-2024-XYZ" passed a pattern of r"INV-\d{4}".
+            if not isinstance(value, str) or not compiled.fullmatch(value):
                 findings.append(Finding(f"matches[{path}]", severity,
                                         f"{value!r} does not match {label or pattern}",
                                         concrete, value))
@@ -181,9 +228,11 @@ def no_placeholders(*paths, extra=None, severity=Severity.BLOCKER):
 
     def check(data):
         findings = []
-        targets = paths or ("",)
+        targets = ("",) if not paths else tuple(paths)
         for path in targets:
-            for concrete, value in resolve(data, path):
+            matches, missing = _matched(data, path, "no_placeholders")
+            findings.extend(missing)
+            for concrete, value in matches:
                 for text_path, text in _iter_strings(value, concrete):
                     lowered = text.lower()
                     for needle in needles:
@@ -213,9 +262,14 @@ def citations_resolve(claim_path, cite_field, source_ids, severity=Severity.BLOC
     valid = set(source_ids)
 
     def check(data):
-        findings = []
-        for concrete, claim in resolve(data, claim_path):
+        matches, findings = _matched(data, claim_path, "citations_resolve")
+        for concrete, claim in matches:
             if not isinstance(claim, dict):
+                # A claim that is a bare string carries no citation at all. Skipping it
+                # silently meant an uncited claim passed.
+                findings.append(Finding("citations_resolve", severity,
+                                        "claim is not an object and carries no citation",
+                                        concrete, claim))
                 continue
             if cite_field not in claim:
                 findings.append(Finding("citations_resolve", severity,
@@ -223,8 +277,19 @@ def citations_resolve(claim_path, cite_field, source_ids, severity=Severity.BLOC
                 continue
             cited = claim[cite_field]
             values = cited if isinstance(cited, (list, tuple)) else [cited]
+            if not values:
+                findings.append(Finding("citations_resolve", severity,
+                                        "citation list is empty",
+                                        f"{concrete}.{cite_field}", cited))
+                continue
             for value in values:
-                if value not in valid:
+                # An unhashable value cannot be looked up, and letting the TypeError
+                # propagate discarded every finding gathered before it.
+                try:
+                    ok = value in valid
+                except TypeError:
+                    ok = False
+                if not ok:
                     findings.append(Finding(
                         "citations_resolve", severity,
                         f"cites {value!r}, which does not exist",
@@ -246,7 +311,7 @@ def grounded_numbers(source, paths=None, tolerance=0.0, severity=Severity.BLOCKE
     Schema validation passes it. Type checks pass it. A human skimming passes it. The
     only thing that catches it is asking whether the number is actually in the source.
 
-    TWO LIMITS YOU NEED TO KNOW BEFORE RELYING ON THIS.
+    LIMITS YOU NEED TO KNOW BEFORE RELYING ON THIS.
 
     **It does not understand arithmetic.** If the source holds monthly revenue and the
     output correctly states the annual total, that total is not in the source and this
@@ -286,9 +351,11 @@ def grounded_numbers(source, paths=None, tolerance=0.0, severity=Severity.BLOCKE
 
     def check(data):
         findings = []
-        targets = paths or ("",)
+        targets = ("",) if paths is None else tuple(paths)
         for path in targets:
-            for concrete, value in resolve(data, path):
+            matches, missing = _matched(data, path, "grounded_numbers")
+            findings.extend(missing)
+            for concrete, value in matches:
                 for number_path, number in _iter_numbers(value, concrete):
                     if number in ignored:
                         continue
@@ -330,6 +397,10 @@ def _iter_strings(node, trail=""):
 # Strings that carry digits without making a numeric claim.
 _IDENTIFIER = re.compile(r"^[^\s]*[A-Za-z][^\s]*$")          # s9, INV-2024, user_42, v1.2
 _DATE_LIKE = re.compile(r"^\d{4}-\d{2}-\d{2}|^\d{1,2}/\d{1,2}/\d{2,4}")  # 2026-01-15, 1/15/26
+# Dates embedded in a sentence, which is the documented use case. The docs claimed these
+# were filtered and they were not: "Reported on 03/15/2024" yielded 3, 15 and 2024 as
+# three separate ungrounded figures.
+_DATE_IN_PROSE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}/\d{2,4}\b")
 
 
 def _is_numeric_claim(text):
@@ -368,10 +439,15 @@ def _iter_numbers(node, trail=""):
     elif isinstance(node, str):
         if not _is_numeric_claim(node):
             return
+        node = _DATE_IN_PROSE.sub(" ", node)
         # (?<![\w-]) stops the hyphen in "INV-2024" being read as a minus sign, and stops
         # digits inside an identifier being picked up at all. A real negative number is
         # preceded by a space or start-of-string, never by a letter or another hyphen.
-        for match in re.findall(r"(?<![\w-])-?\d[\d,]*\.?\d*", node):
+        # Commas only join digits when they group in threes. Without that, "regions 4,5
+        # and 6" was read as the number 45, and "sections 1,2,3" as 123, which are
+        # exactly the false positives that get a validator switched off.
+        for match in re.findall(
+            r"(?<![\w-])(?:-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?)", node):
             cleaned = match.replace(",", "").rstrip(".")
             if cleaned and cleaned not in ("-",):
                 try:

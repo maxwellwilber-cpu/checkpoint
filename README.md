@@ -56,7 +56,7 @@ test suite, a CI job, or inline in production without being rewritten.
 C.grounded_numbers(source, paths=["summary", "findings[].text"])
 ```
 
-**Every number in the output must appear in the source data.**
+**Every number in the output must appear in the source data** (0 and 1 excepted by default).
 
 A model summarizing a document will produce a figure that is the right order of
 magnitude, in the right units, formatted correctly, and entirely invented. Schema
@@ -76,26 +76,41 @@ source and not derivable by any stated method. Nothing else in the document is w
 
 ### What it does not do
 
-Three limits, stated up front, because a validator you trust further than it deserves is
-worse than no validator.
+Stated up front, because a validator you trust further than it deserves is worse than no
+validator. Each of these has a test asserting it, so none can change without someone
+noticing.
 
 **It does not understand arithmetic.** If the source holds monthly revenue and the output
 correctly states the annual total, that total is not in the source and it gets flagged.
-Sums, averages and growth rates all fail. For output that computes anything, list only
-the fields that quote source values directly, or put the derived figures into the source
-you pass in.
+Sums, averages and growth rates all fail. For output that computes anything, list only the
+fields that quote source values directly, or put the derived figures into the source you
+pass in.
 
-**It does not check which claim a number belongs to.** The test is membership in a flat
-bag of numbers. With revenue 104000 and headcount 14 in the source, "headcount is 104000"
-passes, because 104000 is in there somewhere. It catches invented values. It does not
-catch a real value attached to the wrong subject.
+**It does not check which claim a number belongs to.** The test is membership in a flat bag
+of numbers. With revenue 104000 and headcount 14 in the source, "headcount is 104000"
+passes, because 104000 is in there somewhere. It catches invented values. It does not catch
+a real value attached to the wrong subject.
+
+**0 and 1 are ignored by default.** They are too common to be evidence of anything, so
+"there was 1 issue" never gets flagged. Change it with `ignore=()` if you need them checked.
 
 **Section and version numbers in prose still count.** "See section 3.2" reads as a figure.
-Identifiers like `INV-2024` and dates are filtered out, but section references are not,
-because a heuristic aggressive enough to catch them starts discarding real values. Use
-`ignore` for the ones you expect.
+Identifiers like `INV-2024` and dates in any common format are filtered out; section
+references are not, because a heuristic aggressive enough to catch them starts discarding
+real values. Use `ignore` for the ones you expect.
 
-All three have tests asserting them, so they cannot change without someone noticing.
+### What it does do that is easy to miss
+
+**A path that matches nothing is reported, not skipped.** One typo in a field name used to
+produce a clean PASS on a document nobody validated:
+
+```python
+grounded_numbers(src, paths=["findings[].text"])   # catches the invented number
+grounded_numbers(src, paths=["findings[].txet"])   # WARNING: path matched nothing
+```
+
+Every path-taking check does this. It is a warning rather than a blocker, because optional
+fields legitimately go missing, but it is never silent.
 
 **Scope this check deliberately.** It is the one real subtlety in the library. Grounding
 applies to claims *about* the data: summaries, findings, computed figures. It must not
@@ -114,11 +129,11 @@ I found that out by writing the example and watching a perfectly good output fai
 |---|---|
 | `required(*paths)` | Missing or null fields |
 | `not_empty(*paths)` | Blank strings, empty lists (but `0` is a real value, not an absence) |
-| `of_type(path, types)` | `"1200"` returned where `1200` was needed |
-| `numeric_range(path, min, max)` | Negative prices, percentages over 100 |
+| `of_type(path, expected)` | `"1200"` returned where `1200` was needed |
+| `numeric_range(path, minimum, maximum)` | Negative prices, percentages over 100 |
 | `one_of(path, allowed)` | Invented enum values. Asked for high/medium/low, got "moderate" |
 | `matches(path, regex)` | Malformed ids, dates, codes |
-| `word_count(path, min, max)` | Summaries that run long or short (warning, not blocker) |
+| `word_count(path, minimum, maximum)` | Summaries that run long or short (warning, not blocker) |
 | `no_placeholders()` | `[INSERT NAME]`, `TODO`, `lorem ipsum`, "As an AI language model…" |
 | `citations_resolve(...)` | Citations pointing at sources that do not exist |
 | `grounded_numbers(source)` | Numbers that appear nowhere in the input |
@@ -217,7 +232,7 @@ failed = {k: r for k, r in reports.items() if not r.passed}
 python -m pytest tests/ -v
 ```
 
-71 tests. The ones worth reading are the regressions, because each is a bug this library
+92 tests. The ones worth reading are the regressions, because each is a bug this library
 actually had:
 
 - `test_identifiers_are_not_treated_as_numeric_claims`: `grounded_numbers` once mined
@@ -241,7 +256,7 @@ checkpoint/
   runner.py    validate(), validate_many()
 examples/
   validate_llm_output.py    three outputs, one ruleset, worked end to end
-tests/                      67 pytest tests
+tests/                      92 pytest tests
 ```
 
 ## Related

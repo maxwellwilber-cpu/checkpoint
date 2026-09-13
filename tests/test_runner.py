@@ -144,3 +144,38 @@ class TestValidateMany:
         items = [{"id": "x", "a": 1}, {"id": "y"}]
         reports = cp.validate_many(items, C.required("a"), key=lambda i: i["id"])
         assert not reports["y"].passed
+
+
+class TestSeverityCoercion:
+    def test_a_string_severity_still_blocks(self):
+        # Severity subclasses str, so severity="BLOCKER" looked right and produced a
+        # recorded blocker on a report that said PASS.
+        from checkpoint import rule
+        @rule(severity="BLOCKER")
+        def bad(data):
+            return "definitely broken"
+        report = cp.validate({}, [bad])
+        assert not report.passed
+        assert report.to_dict()["counts"]["blocker"] == 1
+
+    def test_an_invalid_severity_is_rejected_loudly(self):
+        from checkpoint.types import Finding
+        with pytest.raises(ValueError):
+            Finding("x", "NOT_A_SEVERITY", "msg")
+
+
+class TestTupleReturn:
+    def test_two_messages_produce_two_findings(self):
+        from checkpoint import rule
+        @rule()
+        def two(data):
+            return ("summary is empty", "title is empty")
+        assert len(cp.validate({}, [two]).findings) == 2
+
+    def test_path_and_message_still_produce_one(self):
+        from checkpoint import rule
+        @rule()
+        def located(data):
+            return ("items[0].price", "is negative")
+        findings = cp.validate({}, [located]).findings
+        assert len(findings) == 1 and findings[0].path == "items[0].price"

@@ -29,6 +29,25 @@ class Severity(str, Enum):
     INFO = "INFO"
 
 
+def _coerce_severity(value):
+    """
+    Accept a Severity or the string form of one.
+
+    Severity subclasses str, so `severity="BLOCKER"` looks correct, type-checks nowhere,
+    and used to produce a finding that compared unequal to Severity.BLOCKER. The result
+    was a recorded BLOCKER on a report that said PASS, which is the exact failure this
+    library exists to prevent. Coerce instead of trusting.
+    """
+    if isinstance(value, Severity):
+        return value
+    try:
+        return Severity(str(value).upper())
+    except ValueError:
+        raise ValueError(
+            f"severity must be one of {[s.value for s in Severity]}, got {value!r}"
+        )
+
+
 @dataclass(frozen=True)
 class Finding:
     """
@@ -52,6 +71,9 @@ class Finding:
     message: str
     path: str = ""
     value: Any = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "severity", _coerce_severity(self.severity))
 
     def __str__(self):
         location = f" at {self.path}" if self.path else ""
